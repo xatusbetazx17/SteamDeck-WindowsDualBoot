@@ -23,57 +23,6 @@ def install_package(package_name):
     except subprocess.CalledProcessError as e:
         print(f"Error installing {package_name}: {e.stderr}")
 
-# Check if PyQt5 is installed, if not, install it
-def install_pyqt5():
-    if platform.system() == "Linux":
-        print("Attempting to install PyQt5 on SteamOS (Linux)...")
-        try:
-            result = subprocess.run("sudo pacman -S python-pyqt5 --noconfirm", shell=True, check=True, capture_output=True, text=True)
-            print(result.stdout)
-        except subprocess.CalledProcessError as e:
-            print(f"Error installing PyQt5 on SteamOS: {e.stderr}")
-            print("Please try running the following command manually:")
-            print("sudo pacman -S python-pyqt5")
-    elif platform.system() == "Windows":
-        print("Attempting to install PyQt5 on Windows...")
-        try:
-            result = subprocess.run("pip install PyQt5", shell=True, check=True, capture_output=True, text=True)
-            print(result.stdout)
-        except subprocess.CalledProcessError as e:
-            print(f"Error installing PyQt5 on Windows: {e.stderr}")
-            print("Please try running the following command manually:")
-            print("pip install PyQt5")
-
-# Check if PyQt5 is installed, if not, install it
-try:
-    from PyQt5.QtWidgets import QApplication, QWidget, QPushButton, QVBoxLayout, QLabel, QFileDialog, QComboBox, QMessageBox
-except ModuleNotFoundError as e:
-    print("PyQt5 not found: ", e)
-    install_pyqt5()
-
-    # Try importing PyQt5 again after attempting installation
-    try:
-        from PyQt5.QtWidgets import QApplication, QWidget, QPushButton, QVBoxLayout, QLabel, QFileDialog, QComboBox, QMessageBox
-    except ModuleNotFoundError as e:
-        print("PyQt5 installation failed. Please try to install it manually.")
-        print(f"Error details: {e}")
-        sys.exit(1)
-
-# Function to detect the microSD card or USB
-def detect_storage_device():
-    try:
-        # Filter for USB or microSD devices, exclude internal drives (like sda or nvme0)
-        result = subprocess.check_output("lsblk -o NAME,SIZE,TYPE,MOUNTPOINT | grep -E 'sd[b-z]|mmcblk'", shell=True).decode('utf-8')
-        devices = [line.split()[0] for line in result.strip().split("\n")]
-        if devices:
-            return devices
-        else:
-            print("No external storage device detected.")
-            return None
-    except subprocess.CalledProcessError:
-        print("Error detecting storage devices.")
-        return None
-
 # Function to check and install wimlib-imagex if missing
 def check_and_install_wimlib():
     try:
@@ -85,152 +34,112 @@ def check_and_install_wimlib():
     except subprocess.CalledProcessError as e:
         print(f"Error checking wimlib-imagex: {e}")
 
-# Function to download Windows ISO
-def download_windows_iso():
-    download_url = "https://www.microsoft.com/en-us/software-download/windows11"
-    print(f"Opening browser to download Windows ISO from: {download_url}")
-    os.system(f"xdg-open {download_url}")  # Open browser to download the ISO manually
+# Function to mount the ISO and locate the WIM/ESD file
+def mount_iso(iso_file, mount_point):
+    try:
+        if not os.path.exists(mount_point):
+            os.makedirs(mount_point)
+        subprocess.run(f"sudo mount -o loop {iso_file} {mount_point}", shell=True, check=True)
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"Error mounting ISO: {e}")
+        return False
 
-# Function to list available Windows versions from ISO (use wimlib)
-def list_windows_versions(iso_file):
+# Function to unmount the ISO
+def unmount_iso(mount_point):
+    try:
+        subprocess.run(f"sudo umount {mount_point}", shell=True, check=True)
+        print("ISO unmounted successfully.")
+    except subprocess.CalledProcessError as e:
+        print(f"Error unmounting ISO: {e}")
+
+# Function to find the install.wim or install.esd file in the mounted ISO
+def find_install_wim(mount_point):
+    sources_dir = os.path.join(mount_point, "sources")
+    try:
+        install_file = next(f for f in os.listdir(sources_dir) if f.startswith("install.") and f.endswith(("wim", "esd")))
+        return os.path.join(sources_dir, install_file)
+    except StopIteration:
+        print("No install.wim or install.esd file found.")
+        return None
+
+# Function to list available Windows versions from the WIM/ESD file using wimlib
+def list_windows_versions(wim_file):
     try:
         check_and_install_wimlib()  # Ensure wimlib-imagex is installed
-        # Use wimlib-imagex to list Windows versions
-        cmd = f"wimlib-imagex info {iso_file}"
-        output = subprocess.check_output(cmd, shell=True).decode('utf-8')
-        versions = []
-        for line in output.split('\n'):
-            if "Name:" in line:
-                version = line.split(":")[1].strip()
-                versions.append(version)
+        output = subprocess.check_output(f"wimlib-imagex info {wim_file}", shell=True).decode('utf-8')
+        versions = [line.split(":")[1].strip() for line in output.split("\n") if "Name:" in line]
         return versions
     except subprocess.CalledProcessError as e:
-        print(f"Error reading Windows versions: {e.stderr}")
+        print(f"Error listing Windows versions: {e}")
         return []
 
 # Function to create bootable Windows media on microSD or USB
-def create_windows_media(storage_device, iso_file, selected_version):
-    if not iso_file:
-        print("No ISO selected.")
-        return
+def create_windows_media(install_wim, storage_device, selected_version):
+    try:
+        print(f"Writing Windows version {selected_version} to {storage_device}...")
+        # Apply the selected Windows version to the storage device
+        os.system(f"sudo wimlib-imagex apply {install_wim} {selected_version} /mnt/target")
 
-    print(f"Writing Windows ISO ({selected_version}) to {storage_device}...")
-    os.system(f"sudo dd if={iso_file} of=/dev/{storage_device} bs=4M status=progress && sync")
-    print(f"Windows ISO successfully written to {storage_device}")
+        # Make the device bootable (GRUB or efibootmgr setup)
+        os.system(f"sudo grub-install --target=x86_64-efi --efi-directory=/mnt/target/efi --boot-directory=/mnt/target/boot --removable {storage_device}")
+        print("Windows successfully written to the USB/microSD and made bootable.")
+    except Exception as e:
+        print(f"Error creating bootable media: {e}")
 
-# Define the main application class
-class DualBootApp(QWidget):
+# Function to detect the microSD card or USB
+def detect_storage_device():
+    try:
+        # Detect connected USB/microSD devices (external drives)
+        result = subprocess.check_output("lsblk -o NAME,SIZE,TYPE,MOUNTPOINT | grep -E 'sd[b-z]|mmcblk'", shell=True).decode('utf-8')
+        devices = [line.split()[0] for line in result.strip().split("\n")]
+        return devices if devices else None
+    except subprocess.CalledProcessError as e:
+        print(f"Error detecting storage devices: {e}")
+        return None
+
+# Main application class
+class RufusClone(QWidget):
     def __init__(self):
         super().__init__()
 
-        # Setup window
-        self.setWindowTitle("Steam Deck Dual Boot & Windows Installation")
+        self.setWindowTitle("Windows To Go Installation Tool")
         self.setGeometry(100, 100, 600, 400)
 
-        # Detect the current OS
-        self.os = platform.system()
-
-        # Install necessary packages based on the OS
-        self.install_dependencies()
-
-        # Create UI elements
-        self.status_label = QLabel(self)
-        self.version_selection = QComboBox(self)
-        self.device_selection = QComboBox(self)  # Dropdown for selecting the device
         self.iso_file = None
+        self.wim_file = None
+        self.selected_version = None
+        # Changed mount point to home directory to avoid permission errors
+        self.mount_point = os.path.expanduser("~/windows_iso_mount")  # Home directory mount point
+
         self.setup_ui()
 
-    def install_dependencies(self):
-        """
-        Install necessary dependencies based on the detected operating system.
-        """
-        if self.os == "Linux":
-            print("Detected SteamOS (Linux). Installing necessary packages...")
-            # Check if efibootmgr is installed
-            if not self.is_package_installed('efibootmgr'):
-                os.system("sudo pacman -S efibootmgr --noconfirm")
-
-            # Optionally install rEFInd (for better boot management)
-            if not self.is_package_installed('refind'):
-                os.system("sudo pacman -S refind --noconfirm")
-
-            # Handle systemd session management error
-            try:
-                os.system("sudo systemctl --user start steam.service || echo 'Already in Desktop Mode'")
-            except Exception as e:
-                print(f"Systemd session management error: {e}")
-        elif self.os == "Windows":
-            print("Detected Windows. Ensuring bcdedit and boot configurations...")
-            try:
-                subprocess.check_output(["bcdedit", "/enum"])
-            except subprocess.CalledProcessError:
-                print("Error: bcdedit not available or permission issue.")
-                sys.exit(1)
-
-    def is_package_installed(self, package_name):
-        """
-        Check if a package is installed on SteamOS (Linux).
-        """
-        try:
-            result = subprocess.check_output(f"pacman -Q {package_name}", shell=True)
-            return True if result else False
-        except subprocess.CalledProcessError:
-            return False
-
     def setup_ui(self):
-        """
-        Setup the UI based on the operating system.
-        """
         layout = QVBoxLayout()
 
-        if self.os == "Linux":
-            self.status_label.setText("Currently on SteamOS")
-            layout.addWidget(self.status_label)
+        self.iso_label = QLabel("No ISO selected")
+        layout.addWidget(self.iso_label)
 
-            # Button to download Windows ISO
-            self.download_iso_button = QPushButton("Download Windows ISO", self)
-            self.download_iso_button.clicked.connect(download_windows_iso)
-            layout.addWidget(self.download_iso_button)
+        self.select_iso_button = QPushButton("Select Windows ISO")
+        self.select_iso_button.clicked.connect(self.select_iso)
+        layout.addWidget(self.select_iso_button)
 
-            # Button to select ISO and list Windows versions
-            self.select_iso_button = QPushButton("Select Windows ISO and List Versions", self)
-            self.select_iso_button.clicked.connect(self.select_iso_file)
-            layout.addWidget(self.select_iso_button)
+        self.version_selection = QComboBox(self)
+        layout.addWidget(self.version_selection)
 
-            # Add dropdown to select the Windows version
-            layout.addWidget(QLabel("Select Windows Version:"))
-            layout.addWidget(self.version_selection)
+        self.select_storage_button = QPushButton("Create Bootable USB/microSD")
+        self.select_storage_button.clicked.connect(self.create_bootable)
+        layout.addWidget(self.select_storage_button)
 
-            # Dropdown to select SD card/USB
-            layout.addWidget(QLabel("Select Storage Device:"))
-            layout.addWidget(self.device_selection)
-            self.refresh_storage_devices()
+        self.device_selection = QComboBox(self)  # Dropdown to select device
+        layout.addWidget(QLabel("Select Storage Device:"))
+        layout.addWidget(self.device_selection)
 
-            # Button to detect SD card/USB and create Windows boot media
-            self.sd_card_button = QPushButton("Create Windows Boot Media on microSD/USB", self)
-            self.sd_card_button.clicked.connect(self.create_storage_media)
-            layout.addWidget(self.sd_card_button)
-
-            # Button to switch to Windows
-            self.switch_button = QPushButton("Switch to Windows", self)
-            self.switch_button.clicked.connect(self.switch_to_windows)
-            layout.addWidget(self.switch_button)
-
-        elif self.os == "Windows":
-            self.status_label.setText("Currently on Windows")
-            layout.addWidget(self.status_label)
-
-            # Button to switch back to SteamOS
-            self.switch_button = QPushButton("Switch to SteamOS Game Mode", self)
-            self.switch_button.clicked.connect(self.switch_to_steam_os)
-            layout.addWidget(self.switch_button)
+        self.refresh_storage_devices()
 
         self.setLayout(layout)
 
     def refresh_storage_devices(self):
-        """
-        Detect and list available storage devices (USB/microSD) for installation.
-        """
         devices = detect_storage_device()
         if devices:
             self.device_selection.clear()
@@ -238,42 +147,37 @@ class DualBootApp(QWidget):
         else:
             QMessageBox.warning(self, "Error", "No storage devices detected. Please insert a USB or microSD card.")
 
-    def select_iso_file(self):
+    def select_iso(self):
         self.iso_file, _ = QFileDialog.getOpenFileName(self, "Select Windows ISO", "", "ISO Files (*.iso)")
         if self.iso_file:
-            self.status_label.setText(f"Selected ISO: {self.iso_file}")
-            windows_versions = list_windows_versions(self.iso_file)
-            self.version_selection.clear()
-            self.version_selection.addItems(windows_versions)
+            self.iso_label.setText(f"Selected ISO: {self.iso_file}")
+            if mount_iso(self.iso_file, self.mount_point):
+                self.wim_file = find_install_wim(self.mount_point)
+                if self.wim_file:
+                    versions = list_windows_versions(self.wim_file)
+                    self.version_selection.clear()
+                    self.version_selection.addItems(versions)
+                else:
+                    QMessageBox.warning(self, "Error", "No install.wim or install.esd file found in the ISO.")
         else:
-            self.status_label.setText("No ISO file selected.")
+            self.iso_label.setText("No ISO file selected.")
 
-    def create_storage_media(self):
-        storage_device = self.device_selection.currentText()
+    def create_bootable(self):
         selected_version = self.version_selection.currentText()
-        if storage_device and self.iso_file:
-            create_windows_media(storage_device, self.iso_file, selected_version)
+        storage_device = self.device_selection.currentText()
+
+        if storage_device and self.wim_file:
+            create_windows_media(self.wim_file, storage_device, selected_version)
+            unmount_iso(self.mount_point)
         else:
-            QMessageBox.warning(self, "Error", "Please select ISO file and storage device.")
-
-    def switch_to_windows(self):
-        """
-        Switch from SteamOS to Windows.
-        """
-        os.system("sudo efibootmgr -n 1 && sudo reboot")  # Assuming Windows is boot entry 1
-
-    def switch_to_steam_os(self):
-        """
-        Switch from Windows to SteamOS Game Mode.
-        """
-        os.system("bcdedit /set {bootmgr} bootsequence {your-efi-steamos-entry}")
-        os.system("shutdown /r /t 0")  # Restart Windows
+            QMessageBox.warning(self, "Error", "Please select a storage device and Windows version.")
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    window = DualBootApp()
+    window = RufusClone()
     window.show()
     sys.exit(app.exec_())
+
 
 ```
 
