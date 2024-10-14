@@ -34,6 +34,25 @@ def check_and_install_wimlib():
     except subprocess.CalledProcessError as e:
         print(f"Error checking wimlib-imagex: {e}")
 
+# Function to partition and format the USB/microSD for UEFI booting
+def partition_and_format_device(storage_device):
+    try:
+        # Create GPT partition table and partitions (100MB EFI partition and the rest for Windows)
+        print(f"Partitioning {storage_device}...")
+        os.system(f"sudo parted /dev/{storage_device} --script mklabel gpt")
+        os.system(f"sudo parted /dev/{storage_device} --script mkpart ESP fat32 1MiB 100MiB")
+        os.system(f"sudo parted /dev/{storage_device} --script set 1 boot on")
+        os.system(f"sudo parted /dev/{storage_device} --script mkpart primary ntfs 100MiB 100%")
+
+        # Format the EFI partition as FAT32
+        os.system(f"sudo mkfs.fat -F32 /dev/{storage_device}1")
+
+        # Format the main partition for Windows
+        os.system(f"sudo mkfs.ntfs -f /dev/{storage_device}2")
+        print(f"Partitioning and formatting complete for {storage_device}.")
+    except Exception as e:
+        print(f"Error partitioning device: {e}")
+
 # Function to mount the ISO and locate the WIM/ESD file
 def mount_iso(iso_file, mount_point):
     try:
@@ -77,15 +96,31 @@ def list_windows_versions(wim_file):
 # Function to create bootable Windows media on microSD or USB
 def create_windows_media(install_wim, storage_device, selected_version):
     try:
+        # Partition and format the USB/microSD
+        partition_and_format_device(storage_device)
+
+        # Mount the partitions
+        print(f"Mounting {storage_device} partitions...")
+        os.system(f"sudo mount /dev/{storage_device}2 /mnt/target")
+        os.system(f"sudo mkdir -p /mnt/target/efi")
+        os.system(f"sudo mount /dev/{storage_device}1 /mnt/target/efi")
+
+        # Apply the selected Windows version to the main partition
         print(f"Writing Windows version {selected_version} to {storage_device}...")
-        # Apply the selected Windows version to the storage device
         os.system(f"sudo wimlib-imagex apply {install_wim} {selected_version} /mnt/target")
 
-        # Make the device bootable (GRUB or efibootmgr setup)
-        os.system(f"sudo grub-install --target=x86_64-efi --efi-directory=/mnt/target/efi --boot-directory=/mnt/target/boot --removable {storage_device}")
+        # Make the device bootable with GRUB
+        print("Installing GRUB bootloader...")
+        os.system(f"sudo grub-install --target=x86_64-efi --efi-directory=/mnt/target/efi --boot-directory=/mnt/target/boot --removable /dev/{storage_device}")
+
         print("Windows successfully written to the USB/microSD and made bootable.")
     except Exception as e:
         print(f"Error creating bootable media: {e}")
+    finally:
+        # Unmount partitions
+        print(f"Unmounting {storage_device} partitions...")
+        os.system(f"sudo umount /mnt/target/efi")
+        os.system(f"sudo umount /mnt/target")
 
 # Function to detect the microSD card or USB
 def detect_storage_device():
