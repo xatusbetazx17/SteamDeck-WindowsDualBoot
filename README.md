@@ -8,14 +8,22 @@ import sys
 import os
 import platform
 import subprocess
-from PyQt5.QtWidgets import QApplication, QWidget, QPushButton, QVBoxLayout, QLabel, QFileDialog, QComboBox, QMessageBox
+from PyQt5.QtWidgets import QApplication, QWidget, QPushButton, QVBoxLayout, QLabel, QFileDialog, QComboBox, QSpinBox, QMessageBox, QCheckBox
 
 # Function to install missing packages automatically
 def install_package(package_name):
     try:
         if platform.system() == "Linux":
-            print(f"Installing {package_name}...")
-            result = subprocess.run(f"sudo pacman -S {package_name} --noconfirm", shell=True, check=True, capture_output=True, text=True)
+            # Check for package manager and install package accordingly
+            if subprocess.run("which apt", shell=True, stdout=subprocess.PIPE).returncode == 0:
+                result = subprocess.run(f"sudo apt install {package_name} -y", shell=True, check=True, capture_output=True, text=True)
+            elif subprocess.run("which pacman", shell=True, stdout=subprocess.PIPE).returncode == 0:
+                result = subprocess.run(f"sudo pacman -S {package_name} --noconfirm", shell=True, check=True, capture_output=True, text=True)
+            elif subprocess.run("which dnf", shell=True, stdout=subprocess.PIPE).returncode == 0:
+                result = subprocess.run(f"sudo dnf install {package_name} -y", shell=True, check=True, capture_output=True, text=True)
+            else:
+                print("No supported package manager found.")
+                return
             print(result.stdout)
             print(f"{package_name} installed successfully!")
         else:
@@ -23,31 +31,50 @@ def install_package(package_name):
     except subprocess.CalledProcessError as e:
         print(f"Error installing {package_name}: {e.stderr}")
 
-# Function to check and install wimlib-imagex if missing
+# Function to check if wimlib is installed
 def check_and_install_wimlib():
-    try:
-        if subprocess.call(["which", "wimlib-imagex"], stdout=subprocess.DEVNULL) != 0:
-            print("wimlib-imagex is not installed. Attempting to install it...")
-            install_package('wimlib')
-        else:
-            print("wimlib-imagex is already installed.")
-    except subprocess.CalledProcessError as e:
-        print(f"Error checking wimlib-imagex: {e}")
+    if subprocess.call(["which", "wimlib-imagex"], stdout=subprocess.DEVNULL) != 0:
+        print("wimlib-imagex is not installed. Attempting to install it...")
+        install_package('wimlib')
+    else:
+        print("wimlib-imagex is already installed.")
 
-# Function to partition and format the USB/microSD for UEFI booting
-def partition_and_format_device(storage_device):
+# Function to install Ventoy
+def install_ventoy():
     try:
-        # Create GPT partition table and partitions (100MB EFI partition and the rest for Windows)
+        ventoy_url = "https://github.com/ventoy/Ventoy/releases/latest/download/ventoy-1.0.82-linux.tar.gz"
+        ventoy_tar = "ventoy.tar.gz"
+        ventoy_dir = os.path.expanduser("~/ventoy")
+
+        if not os.path.exists(ventoy_dir):
+            print("Downloading and installing Ventoy...")
+            os.system(f"wget {ventoy_url} -O {ventoy_tar}")
+            os.system(f"tar -xzf {ventoy_tar} -C ~/")
+        else:
+            print("Ventoy is already installed.")
+    except Exception as e:
+        print(f"Error installing Ventoy: {e}")
+
+# Function to partition and format the USB/microSD based on user input
+def partition_and_format_device(storage_device, partition_size, is_primary):
+    try:
         print(f"Partitioning {storage_device}...")
+        # Partition the storage device
         os.system(f"sudo parted /dev/{storage_device} --script mklabel gpt")
         os.system(f"sudo parted /dev/{storage_device} --script mkpart ESP fat32 1MiB 100MiB")
         os.system(f"sudo parted /dev/{storage_device} --script set 1 boot on")
-        os.system(f"sudo parted /dev/{storage_device} --script mkpart primary ntfs 100MiB 100%")
 
-        # Format the EFI partition as FAT32
+        # User input size for partitioning
+        if partition_size:
+            end_size = f"{partition_size}MiB"
+        else:
+            end_size = "100%"
+
+        part_type = "primary" if is_primary else "logical"
+        os.system(f"sudo parted /dev/{storage_device} --script mkpart {part_type} ntfs 100MiB {end_size}")
+
+        # Format the partitions
         os.system(f"sudo mkfs.fat -F32 /dev/{storage_device}1")
-
-        # Format the main partition for Windows
         os.system(f"sudo mkfs.ntfs -f /dev/{storage_device}2")
         print(f"Partitioning and formatting complete for {storage_device}.")
     except Exception as e:
@@ -93,39 +120,34 @@ def list_windows_versions(wim_file):
         print(f"Error listing Windows versions: {e}")
         return []
 
-# Function to create bootable Windows media on microSD or USB
-def create_windows_media(install_wim, storage_device, selected_version):
+# Function to install Ventoy on the selected USB drive
+def install_ventoy_on_device(storage_device):
+    try:
+        print(f"Installing Ventoy on {storage_device}...")
+        os.system(f"sudo ~/ventoy/Ventoy2Disk.sh -i /dev/{storage_device}")
+        print("Ventoy installation complete.")
+    except Exception as e:
+        print(f"Error installing Ventoy: {e}")
+
+# Function to create bootable Windows media with Ventoy
+def create_windows_media_with_ventoy(storage_device, iso_file, selected_version, partition_size, is_primary):
     try:
         # Partition and format the USB/microSD
-        partition_and_format_device(storage_device)
+        partition_and_format_device(storage_device, partition_size, is_primary)
 
-        # Mount the partitions
-        print(f"Mounting {storage_device} partitions...")
-        os.system(f"sudo mount /dev/{storage_device}2 /mnt/target")
-        os.system(f"sudo mkdir -p /mnt/target/efi")
-        os.system(f"sudo mount /dev/{storage_device}1 /mnt/target/efi")
+        # Install Ventoy
+        install_ventoy_on_device(storage_device)
 
-        # Apply the selected Windows version to the main partition
-        print(f"Writing Windows version {selected_version} to {storage_device}...")
-        os.system(f"sudo wimlib-imagex apply {install_wim} {selected_version} /mnt/target")
-
-        # Make the device bootable with GRUB
-        print("Installing GRUB bootloader...")
-        os.system(f"sudo grub-install --target=x86_64-efi --efi-directory=/mnt/target/efi --boot-directory=/mnt/target/boot --removable /dev/{storage_device}")
-
-        print("Windows successfully written to the USB/microSD and made bootable.")
+        # Apply the selected Windows version using wimlib-imagex
+        print(f"Writing Windows version {selected_version} to the device...")
+        os.system(f"sudo wimlib-imagex apply {iso_file} {selected_version} /mnt/target")
+        print("Windows successfully copied and Ventoy installed.")
     except Exception as e:
-        print(f"Error creating bootable media: {e}")
-    finally:
-        # Unmount partitions
-        print(f"Unmounting {storage_device} partitions...")
-        os.system(f"sudo umount /mnt/target/efi")
-        os.system(f"sudo umount /mnt/target")
+        print(f"Error creating bootable media with Ventoy: {e}")
 
 # Function to detect the microSD card or USB
 def detect_storage_device():
     try:
-        # Detect connected USB/microSD devices (external drives)
         result = subprocess.check_output("lsblk -o NAME,SIZE,TYPE,MOUNTPOINT | grep -E 'sd[b-z]|mmcblk'", shell=True).decode('utf-8')
         devices = [line.split()[0] for line in result.strip().split("\n")]
         return devices if devices else None
@@ -134,41 +156,60 @@ def detect_storage_device():
         return None
 
 # Main application class
-class RufusClone(QWidget):
+class RufusCloneVentoy(QWidget):
     def __init__(self):
         super().__init__()
 
-        self.setWindowTitle("Windows To Go Installation Tool")
+        self.setWindowTitle("Windows To Go Installation Tool with Ventoy")
         self.setGeometry(100, 100, 600, 400)
 
         self.iso_file = None
-        self.wim_file = None
-        self.selected_version = None
-        # Changed mount point to home directory to avoid permission errors
-        self.mount_point = os.path.expanduser("~/windows_iso_mount")  # Home directory mount point
+        self.partition_size = 0  # Default size for partition
+        self.is_primary = True  # Default to primary partition
+        self.wim_file = None  # Store the install.wim file
+        self.selected_version = None  # Store selected Windows version
 
         self.setup_ui()
 
     def setup_ui(self):
         layout = QVBoxLayout()
 
+        # Label for selected ISO
         self.iso_label = QLabel("No ISO selected")
         layout.addWidget(self.iso_label)
 
+        # Button to select Windows ISO
         self.select_iso_button = QPushButton("Select Windows ISO")
         self.select_iso_button.clicked.connect(self.select_iso)
         layout.addWidget(self.select_iso_button)
 
+        # ComboBox to select Windows version
         self.version_selection = QComboBox(self)
+        layout.addWidget(QLabel("Select Windows Version:"))
         layout.addWidget(self.version_selection)
 
-        self.select_storage_button = QPushButton("Create Bootable USB/microSD")
-        self.select_storage_button.clicked.connect(self.create_bootable)
-        layout.addWidget(self.select_storage_button)
+        # Partition size input
+        self.partition_size_input = QSpinBox(self)
+        self.partition_size_input.setMinimum(100)  # Minimum 100MB for partition
+        self.partition_size_input.setMaximum(100000)  # Max size limit
+        self.partition_size_input.setValue(4096)  # Default to 4GB
+        layout.addWidget(QLabel("Partition Size (MB):"))
+        layout.addWidget(self.partition_size_input)
 
-        self.device_selection = QComboBox(self)  # Dropdown to select device
+        # Option for primary or logical partition
+        self.is_primary_checkbox = QCheckBox("Primary Partition")
+        self.is_primary_checkbox.setChecked(True)
+        layout.addWidget(self.is_primary_checkbox)
+
+        # Dropdown to select storage device
+        self.device_selection = QComboBox(self)
         layout.addWidget(QLabel("Select Storage Device:"))
         layout.addWidget(self.device_selection)
+
+        # Button to create bootable USB/microSD
+        self.create_bootable_button = QPushButton("Create Bootable USB/microSD with Ventoy")
+        self.create_bootable_button.clicked.connect(self.create_bootable)
+        layout.addWidget(self.create_bootable_button)
 
         self.refresh_storage_devices()
 
@@ -186,8 +227,9 @@ class RufusClone(QWidget):
         self.iso_file, _ = QFileDialog.getOpenFileName(self, "Select Windows ISO", "", "ISO Files (*.iso)")
         if self.iso_file:
             self.iso_label.setText(f"Selected ISO: {self.iso_file}")
-            if mount_iso(self.iso_file, self.mount_point):
-                self.wim_file = find_install_wim(self.mount_point)
+            mount_point = os.path.expanduser("~/windows_iso_mount")
+            if mount_iso(self.iso_file, mount_point):
+                self.wim_file = find_install_wim(mount_point)
                 if self.wim_file:
                     versions = list_windows_versions(self.wim_file)
                     self.version_selection.clear()
@@ -200,16 +242,18 @@ class RufusClone(QWidget):
     def create_bootable(self):
         selected_version = self.version_selection.currentText()
         storage_device = self.device_selection.currentText()
+        partition_size = self.partition_size_input.value()
+        is_primary = self.is_primary_checkbox.isChecked()
 
-        if storage_device and self.wim_file:
-            create_windows_media(self.wim_file, storage_device, selected_version)
-            unmount_iso(self.mount_point)
+        if storage_device and self.iso_file:
+            create_windows_media_with_ventoy(storage_device, self.wim_file, selected_version, partition_size, is_primary)
+            unmount_iso(os.path.expanduser("~/windows_iso_mount"))
         else:
             QMessageBox.warning(self, "Error", "Please select a storage device and Windows version.")
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    window = RufusClone()
+    window = RufusCloneVentoy()
     window.show()
     sys.exit(app.exec_())
 
